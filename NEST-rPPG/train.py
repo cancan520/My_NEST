@@ -1,4 +1,5 @@
 # -*- coding: UTF-8 -*-
+import math
 import numpy as np
 import scipy.io as io
 import torch
@@ -9,6 +10,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.autograd import Variable
 from torchvision import transforms
+import torch.nn.functional as F
 import utils
 from datetime import datetime
 import os
@@ -30,6 +32,19 @@ FILEA_NAME = {'VIPL': ['VIPL', 'VIPL', 'STMap_RGB_Align_CSI'], \
               'BUAA': ['BUAA', 'BUAA', 'STMap_RGB'], \
               'UBFC': ['UBFC', 'UBFC', 'STMap']}
 
+def fea_proj():
+
+    dropout = nn.Dropout(0.25)
+    hidden_size = 1024
+    out_dim = 960
+    fea_proj = nn.Sequential(
+        nn.Linear(out_dim,hidden_size),
+        dropout,
+        nn.Linear(hidden_size,out_dim),
+    )
+    fc_proj = nn.Parameter(torch.FloatTensor(out_dim,out_dim))
+    return fea_proj, fc_proj
+
 if __name__ == '__main__':
 
 
@@ -38,7 +53,7 @@ if __name__ == '__main__':
     torch.backends.cudnn.benchmark = False
     Source_domain_Names = TARGET_DOMAIN[args.tgt]
     root_file = r'./STMap/'
-    # 参数   4个源域，1个目标域
+    # 参数
     File_Name_0 = FILEA_NAME[Source_domain_Names[0]]
     source_name_0 = Source_domain_Names[0]
     source_fileRoot_0 = root_file + File_Name_0[0]
@@ -90,9 +105,8 @@ if __name__ == '__main__':
 
     print('batch num:', batch_size_num, ' epoch_num:', epoch_num, ' GPU Inedex:', GPU)
     print(' frames num:', frames_num, ' learning rate:', learning_rate, )
-    print('fold num:', fold_num, ' fold index:', fold_index)
+    print('fold num:', frames_num, ' fold index:', fold_index)
 
-    # 日志
     if not os.path.exists('./Result_log'):
         os.makedirs('./Result_log')
     rPPGNet_name = 'rPPGNet_' + Target_name + 'Spatial' + str(args.spatial_aug_rate) + 'Temporal' + str(args.temporal_aug_rate)
@@ -115,7 +129,7 @@ if __name__ == '__main__':
         source_index_2 = os.listdir(source_fileRoot_2)
         source_index_3 = os.listdir(source_fileRoot_3)
         Target_index = os.listdir(Target_fileRoot)
-        
+
         source_Indexa_0 = MyDataset.getIndex(source_fileRoot_0, source_index_0, \
                                              source_saveRoot_0, source_map_0, 10, frames_num)
         source_Indexa_1 = MyDataset.getIndex(source_fileRoot_1, source_index_1, \
@@ -144,23 +158,20 @@ if __name__ == '__main__':
     src_loader_3 = DataLoader(source_db_3, batch_size=batch_size_num, shuffle=True, num_workers=num_workers)
     tgt_loader = DataLoader(Target_db, batch_size=batch_size_num, shuffle=False, num_workers=num_workers)
 
-    # 模型
     BaseNet = model.BaseNet()
 
     if reTrain == 1:
         BaseNet = torch.load('./Result_Model/' + rPPGNet_name, map_location=device)
         print('load ' + rPPGNet_name + ' right')
     BaseNet.to(device=device)
-    # 优化器
     optimizer_rPPG = torch.optim.Adam(BaseNet.parameters(), lr=learning_rate)
-    # 损失函数
     loss_func_NP = MyLoss.P_loss3().to(device)
     loss_func_L1 = nn.L1Loss().to(device)
     loss_func_SP = MyLoss.SP_loss(device, clip_length=frames_num).to(device)
     loss_func_NEST_CM = MyLoss.NEST_CM().to(device)
     loss_func_NEST_DM = MyLoss.NEST_DM().to(device)
     loss_func_NEST_TA = MyLoss.NEST_TA(device, Num_ref=8).to(device)
-    # 获取迭代器    iter() 函数用来生成迭代器。 __iter__() 返回迭代器本身。 __next__() 返回容器的下一个元素 。
+    loss_func_ProxyPLoss = MyLoss.ProxyPLoss(num_classes=100, scale=12).to(device)
     src_iter_0 = src_loader_0.__iter__()
     src_iter_per_epoch_0 = len(src_iter_0)
 
@@ -173,17 +184,14 @@ if __name__ == '__main__':
     src_iter_3 = src_loader_3.__iter__()
     src_iter_per_epoch_3 = len(src_iter_3)
 
+
     tgt_iter = iter(tgt_loader)
     tgt_iter_per_epoch = len(tgt_iter)
-    
-    # 训练最大迭代次数
+
     max_iter = args.max_iter
-    # 训练开始时间
     start = timer()
     # Training
     BaseNet.train()
-    # 循环迭代
-    # 每经过一个epoch，重新生成一个数据迭代器
     for iter_num in range(max_iter + 1):
         if (iter_num % src_iter_per_epoch_0 == 0):
             src_iter_0 = src_loader_0.__iter__()
@@ -200,7 +208,6 @@ if __name__ == '__main__':
         data2, bvp2, HR_rel2, data_aug2, bvp_aug2, HR_rel_aug2 = src_iter_2.__next__()
         data3, bvp3, HR_rel3, data_aug3, bvp_aug3, HR_rel_aug3 = src_iter_3.__next__()
 
-        # 将数据和标签转换为 PyTorch 中的变量
         data0 = Variable(data0).float().to(device=device)
         bvp0 = Variable(bvp0).float().to(device=device).unsqueeze(dim=1)
         HR_rel0 = Variable(torch.Tensor(HR_rel0)).float().to(device=device)
@@ -216,7 +223,7 @@ if __name__ == '__main__':
         bvp_aug1 = Variable((bvp_aug1)).float().to(device=device).unsqueeze(dim=1)
         HR_rel_aug1 = Variable(torch.Tensor(HR_rel_aug1)).float().to(device=device)
 
-        
+
         data2 = Variable(data2).float().to(device=device)
         bvp2 = Variable((bvp2)).float().to(device=device).unsqueeze(dim=1)
         HR_rel2 = Variable(torch.Tensor(HR_rel2)).float().to(device=device)
@@ -231,23 +238,20 @@ if __name__ == '__main__':
         bvp_aug3 = Variable((bvp_aug3)).float().to(device=device).unsqueeze(dim=1)
         HR_rel_aug3 = Variable(torch.Tensor(HR_rel_aug3)).float().to(device=device)
 
-        # 优化器梯度清零
         optimizer_rPPG.zero_grad()
         d_b0, d_b1, d_b2, d_b3 = data0.shape[0], data1.shape[0], data2.shape[0], data3.shape[0]
-        # 拼接原数据
         input = torch.cat([data0, data1, data2, data3], dim=0)
-        # 拼接增强数据
         input_aug = torch.cat([data_aug0, data_aug1, data_aug2, data_aug3], dim=0)
         bvp_pre, HR_pr, av = BaseNet(input)
         bvp_pre_aug, HR_pr_aug, av_aug = BaseNet(input_aug)
 
-        
+      
+
         bvp_pre0, bvp_pre1, bvp_pre2, bvp_pre3 = bvp_pre[0:d_b0], bvp_pre[d_b0:d_b0+d_b1], bvp_pre[d_b0+d_b1:d_b0+d_b1+d_b2], bvp_pre[d_b0+d_b1+d_b2:]
         HR_pr0, HR_pr1, HR_pr2, HR_pr3 = HR_pr[0:d_b0], HR_pr[d_b0:d_b0+d_b1], HR_pr[d_b0+d_b1:d_b0+d_b1+d_b2], HR_pr[d_b0+d_b1+d_b2:]
         bvp_pre_aug0, bvp_pre_aug1, bvp_pre_aug2, bvp_pre_aug3 = bvp_pre_aug[0:d_b0], bvp_pre_aug[d_b0:d_b0 + d_b1], bvp_pre_aug[d_b0 + d_b1:d_b0 + d_b1 + d_b2], bvp_pre_aug[d_b0 + d_b1 + d_b2:]
         HR_pr_aug0, HR_pr_aug1, HR_pr_aug2, HR_pr_aug3 = HR_pr_aug[0:d_b0], HR_pr_aug[d_b0:d_b0 + d_b1], HR_pr_aug[d_b0 + d_b1:d_b0 + d_b1 + d_b2], HR_pr_aug[d_b0 + d_b1 + d_b2:]
 
-        # 计算损失
         src_loss_0 = MyLoss.get_loss(bvp_pre0, HR_pr0, bvp0, HR_rel0, source_name_0, \
                                      loss_func_NP, loss_func_L1, args, iter_num)
         src_loss_1 = MyLoss.get_loss(bvp_pre1, HR_pr1, bvp1, HR_rel1, source_name_1, \
@@ -257,7 +261,6 @@ if __name__ == '__main__':
         src_loss_3 = MyLoss.get_loss(bvp_pre3, HR_pr3, bvp3, HR_rel3, source_name_3, \
                                      loss_func_NP, loss_func_L1, args, iter_num)
 
-        # 计算增强数据损失
         src_loss_aug_0 = MyLoss.get_loss(bvp_pre_aug0, HR_pr_aug0, bvp_aug0, HR_rel_aug0, source_name_0, \
                                      loss_func_NP, loss_func_L1, args, iter_num)
         src_loss_aug_1 = MyLoss.get_loss(bvp_pre_aug1, HR_pr_aug1, bvp_aug1, HR_rel_aug1, source_name_1, \
@@ -266,18 +269,28 @@ if __name__ == '__main__':
                                      loss_func_NP, loss_func_L1, args, iter_num)
         src_loss_aug_3 = MyLoss.get_loss(bvp_pre_aug3, HR_pr_aug3, bvp_aug3, HR_rel_aug3, source_name_3, \
                                      loss_func_NP, loss_func_L1, args, iter_num)
-        
+
         HR_rels = torch.cat((HR_rel0, HR_rel1, HR_rel2, HR_rel3), dim=0)
         HR_rel_augs = torch.cat((HR_rel_aug0, HR_rel_aug1, HR_rel_aug2, HR_rel_aug3), dim=0)
         loss_CM = -loss_func_NEST_CM(torch.cat((av, av_aug), dim=0))
         loss_DM = loss_func_NEST_DM(av, av_aug)
         loss_TA = loss_func_NEST_TA(torch.cat((av, av_aug), dim=0), torch.cat((HR_rels, HR_rel_augs), dim=0))
 
+        fea_proj, fc_proj = fea_proj()
+        nn.init.kaiming_uniform_(fc_proj, mode='fan_out', a=math.sqrt(5))
+        classifier = nn.Parameter(torch.FloatTensor(100,512))
+        nn.init.kaiming_uniform_(classifier, mode='fan_out', a=math.sqrt(5))
+        fc_proj = F.linear(fc_proj, classifier)
+        # 调整 fc_proj 的形状为 (out_dim, out_dim)
+        fc_proj = fc_proj.view(960, 960)
+        nn.init.kaiming_uniform_(fc_proj, mode='fan_out', a=math.sqrt(5))
+        loss_ProxyPLoss = loss_func_ProxyPLoss(torch.cat((av, av_aug), dim=0), torch.cat((HR_rels, HR_rel_augs), dim=0), fc_proj, device)
+
         k = 2.0 / (1.0 + np.exp(-10.0 * iter_num / args.max_iter)) - 1.0
 
         loss = (src_loss_0 + src_loss_1 + src_loss_2 + src_loss_3) \
                + (src_loss_aug_0 + src_loss_aug_1 + src_loss_aug_2 + src_loss_aug_3) \
-               + 0.1 * k * loss_TA + 0.001 * k * loss_CM + 0.01 * k * loss_DM
+               + 0.1 * k * loss_TA + 0.001 * k * loss_CM + 0.01 * k * loss_DM + 0.01 * k * loss_ProxyPLoss
         if torch.sum(torch.isnan(loss)) > 0:
             print('Nan')
             break
