@@ -2,7 +2,7 @@
 import os
 import shutil
 import torch
-
+import torch.nn.functional as F
 import torch.nn as nn
 from torch.autograd import Function
 import numpy as np
@@ -26,7 +26,7 @@ class P_loss3(nn.Module):
         return loss
 
 
-#   定义一个函数，用于计算两个向量的相似度，train中调用了但没使用？？？
+
 class SP_loss(nn.Module):
     def __init__(self, device, clip_length=256, delta=3, loss_type=1, use_wave=False):
         super(SP_loss, self).__init__()
@@ -126,12 +126,8 @@ class NEST_CM(nn.Module):
         super().__init__()
     def forward(self, av, ratio=0.1):
 
-        # 划分为4个区域
-        # 得到奇异值
         s0 = torch.linalg.svdvals(av[:, 0:64])
-        #  归一化
         s0 = torch.div(s0, torch.sum(s0))
-        #  对奇异值小于ratio/64的求和
         cov_loss0 = torch.sum(s0[s0 < (ratio/64)])
 
         s1 = torch.linalg.svdvals(av[:, 64:192])
@@ -159,8 +155,6 @@ class NEST_DM(nn.Module):
         mm = torch.mm(av_mod, av_aug_mod.permute(1, 0))
         diag = torch.diag(mm)
         loss = torch.mean(-torch.log(torch.div(torch.exp(diag/self.t), (torch.sum(torch.exp(mm/self.t), dim=0)))))
-        # 根据CDA论文修改,效果不好
-        # loss = torch.mean(-torch.log(torch.div(torch.exp(diag/self.t), torch.exp(diag/self.t)+(torch.sum(torch.exp(mm/self.t), dim=0)))))
         return loss
 
 
@@ -171,14 +165,12 @@ class NEST_TA(nn.Module):
         self.Num_ref = Num_ref
         self.Std = std
 
-    # 计算余弦相似度
     def cos_sim(self, l1, l2):
         l1_mod = torch.div(l1, 1e-10 + torch.norm(l1, p=2, dim=1).unsqueeze(1))
         l2_mod = torch.div(l2, 1e-10 + torch.norm(l2, p=2, dim=1).unsqueeze(1))
         sim = torch.mean(torch.sum(torch.mul(l1_mod, l2_mod), dim=1))
         return sim
 
-    # 高斯平滑
     def Gaussian_Smooth(self, sample, mean, std=5):
         gmm_wight = torch.exp(-torch.abs(sample - mean) ** 2 / (2 * std ** 2)) / (torch.sqrt(torch.tensor(2 * math.pi)) * std)
         gmm_wight = gmm_wight / torch.sum(gmm_wight, dim=1).unsqueeze(1)
@@ -186,7 +178,6 @@ class NEST_TA(nn.Module):
 
     def forward(self, Struct, Label):
         batch_size = Struct.shape[0]
-        #   np.tile是将原矩阵横向、纵向地复制
         Ref_Index = np.tile(np.arange(0, batch_size, 1), batch_size)
 
         Label_ref = Label[Ref_Index].reshape(batch_size, batch_size).detach()
@@ -214,10 +205,45 @@ class NEST_TA(nn.Module):
 
         Struct_smooth = torch.sum(ratio * Struct_res, dim=1) + Struct_mean
 
-        #   计算余弦相似度
         sim = self.cos_sim(Struct, Struct_mean)
 
         return 1 - sim
+
+class ProxyPLoss(nn.Module):
+	'''
+	pass
+	'''
+	
+	def __init__(self, num_classes, scale):
+		super(ProxyPLoss, self).__init__()
+		self.soft_plus = nn.Softplus()
+		self.label = torch.LongTensor([i for i in range(num_classes)])
+		self.scale = scale
+	
+	def forward(self, feature, target, proxy, device):
+		# 将feature进行L2归一化
+		feature = F.normalize(feature, p=2, dim=1)  #(480,960)
+		# 通过线性变换将归一化后的特征feature与归一化后的代理点proxy进行相似度计算，得到预测值pred
+		pred = F.linear(feature, F.normalize(proxy.to(device), p=2, dim=1))  # (N, C) N为样本数量，C为类别数量。
+		label = (self.label.unsqueeze(1).to(device) == target.unsqueeze(0))  # (C, N)
+		pred = torch.masked_select(pred.transpose(1, 0), label)  # N,
+		
+		pred = pred.unsqueeze(1)  # (N, 1)
+			
+		feature = torch.matmul(feature, feature.transpose(1, 0))  # (N, N)
+		label_matrix = target.unsqueeze(1) == target.unsqueeze(0)  # (N, N)
+		
+		index_label = torch.LongTensor([i for i in range(feature.shape[0])])  # generate index label
+		index_matrix = index_label.unsqueeze(1) == index_label.unsqueeze(0)  # get index matrix
+		
+		feature = feature * ~label_matrix  # get negative matrix
+		feature = feature.masked_fill(feature < 1e-6, -np.inf)  # (N, N)
+		
+		logits = torch.cat([pred, feature], dim=1)  # (N, 1+N)
+		label = torch.zeros(logits.size(0), dtype=torch.long).to(device)
+		loss = F.nll_loss(F.log_softmax(self.scale * logits, dim=1), label)
+		
+		return loss
 
 def get_loss(bvp_pre, hr_pre, bvp_gt, hr_gt, dataName, \
              loss_sig0, loss_hr, args, inter_num):
